@@ -1,8 +1,9 @@
-pandas
-openpyxl
 streamlit
-math
-io
+pandas
+numpy
 httpx
 certifi
 openai
+openpyxl
+iso3166
+matplotlib
