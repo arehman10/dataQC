@@ -496,7 +496,7 @@ st.set_page_config(
 )
 
 st.title("WBES Data QC Dashboard")
-st.caption("Interactive QC triage + AI Co-Pilot for Enterprise Surveys")
+st.caption("Interactive QC triage + AI Data QC Checker for Enterprise Surveys")
 
 # --- Sidebar: file & filters ---
 with st.sidebar:
@@ -629,7 +629,7 @@ tab_dash, tab_int, tab_qtab, tab_details, tab_checks, tab_ai = st.tabs(
         "Questions",
         "Issue details",
         "Check dictionary",
-        "AI Co-Pilot",
+        "AI Data QC",
     ]
 )
 
@@ -969,9 +969,9 @@ with tab_checks:
         st.dataframe(view_checks[cols], use_container_width=True)
 
 # ---------- AI Co-Pilot tab ----------
-# ---------- AI Co-Pilot tab ----------
+
 with tab_ai:
-    st.subheader("AI Co-Pilot for QC")
+    st.subheader("AI for Data QC")
 
     if AI_CLIENT is None:
         st.info(ai_available_text())
@@ -989,7 +989,7 @@ with tab_ai:
         st.session_state.setdefault("ai_vendor_email", "")
 
         st.markdown(
-            "Use the AI Co-Pilot to summarise issues, ask questions, or draft vendor emails. "
+            "Use the AI Data QC checker to summarise issues, ask questions, or draft vendor emails. "
             "AI never changes the data; it only helps interpret it based on the QC file you uploaded."
         )
 
@@ -1157,3 +1157,4 @@ with tab_ai:
             )
             # Keep the canonical email text in sync with user edits
             st.session_state["ai_vendor_email"] = st.session_state["email_draft_box"]
+
