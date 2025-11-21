@@ -62,6 +62,66 @@ def _extract_main_stata_from_zip(zip_path: str) -> Path:
     return _select_main_dta(dta_files)
 
 
+# ---------- PII / identifier sanitisation for AI ----------
+
+# Exact column names we NEVER want to send to AI
+AI_STRIP_COLUMNS_EXACT = {
+    "technicalid",
+    "interview__id",
+    "interview__key",
+    "assignment__id",
+    "a2_name", "a2_contact_name",
+    "a2_phone", "a2_mobile", "a2_fax",
+    "a2_email",
+    "a3_name", "a3_phone", "a3_email",
+    # add any other known contact / owner fields here
+}
+
+# If any of these substrings appear in the column name (case-insensitive),
+# we also drop them from what we send to AI.
+AI_STRIP_COL_PATTERNS = [
+    "name",
+    "email",
+    "e_mail",
+    "phone",
+    "mobile",
+    "contact",
+    "owner",
+    "director",
+    "manager",
+    "fax",
+    "whatsapp",
+    "instagram",
+    "facebook",
+    "linkedin",
+    "website",
+    "address",
+]
+
+def sanitize_df_for_ai(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df with obvious identifiers and contact info columns removed,
+    so nothing directly identifying businesses or owners is sent to the AI.
+
+    NOTE: this is best-effort and based on column names. Free-text fields might
+    still contain PII; if that's a concern, we should either drop or heavily
+    restrict those too.
+    """
+    if df is None or df.empty:
+        return df
+
+    cols = list(df.columns)
+    drop_cols = set()
+
+    for c in cols:
+        lc = c.lower()
+        if c in AI_STRIP_COLUMNS_EXACT:
+            drop_cols.add(c)
+            continue
+        if any(pat in lc for pat in AI_STRIP_COL_PATTERNS):
+            drop_cols.add(c)
+
+    return df.drop(columns=list(drop_cols), errors="ignore")
 
 
 def download_raw_from_suso(
@@ -2049,29 +2109,22 @@ def ai_check_innovation_strings(
     if not text_cols:
         return "No innovation description text fields (e.g. h3x, h6x, d1a1x) found in the raw dataset."
 
-    id_cols = [c for c in ["interview__key", "interview__id", "technicalid"] if c in df_raw.columns]
     flag_cols = [c for c in ["h1", "h5", "innov"] if c in df_raw.columns]
-
-    cols = list(dict.fromkeys(id_cols + flag_cols + text_cols + ["d1a1a", "d1a1x"]))
+    cols = list(dict.fromkeys(flag_cols + text_cols + ["d1a1a", "d1a1x"]))
     cols = [c for c in cols if c in df_raw.columns]
 
     df_subset = df_raw[cols].copy()
-    # keep only rows with some description text
-    df_subset = df_subset[df_subset[text_cols].notna().any(axis=1)]
-
-    if df_subset.empty:
-        return "No innovation descriptions detected in the sample."
-
-    if len(df_subset) > max_rows:
-        df_subset = df_subset.head(max_rows)
-
+    df_subset = sanitize_df_for_ai(df_subset)
     csv_block = df_subset.to_csv(index=False)
+
 
     context = (
         "You are classifying firms' innovation descriptions using Oslo Manual (2005) definitions. "
         "You must decide if each description is an innovation and, if so, which type(s) of innovation.\n\n"
         "You receive a CSV where each row is one interview, including:\n"
-        f"- ID columns (if present): {', '.join(id_cols) if id_cols else 'none'}\n"
+        f"InterviewID RULE:\n"
+        "- You may leave InterviewID blank or use a simple row index (1, 2, 3...). "
+        "Real identifiers are not provided for privacy; the system will map rows locally.\n\n"
         f"- Possible innovation flags: {', '.join(flag_cols) if flag_cols else 'none'}\n"
         f"- Description fields: {', '.join(text_cols)}\n"
         "- Optional: d1a1a and d1a1x (sector / main product).\n\n"
@@ -2157,6 +2210,7 @@ def ai_check_skip_logic(
 
     # Sample of raw data to keep context manageable
     sample = raw_df.head(max_rows)
+    sample = sanitize_df_for_ai(sample)
     sample_csv = sample.to_csv(index=False)
 
     context = (
@@ -2267,11 +2321,12 @@ def build_interview_context(idu_value: str, data: dict) -> str:
     r = row.iloc[0]
     interviewer_code = r.get(INTERVIEWER_VAR, "")
     lines = []
-    header = f"Interview idu={r['idu']}, technicalid={r.get('technicalid', '')}"
+    header = f"Interview local_id={r['idu']}"
     if interviewer_code != "":
         header += f", interviewer_code={interviewer_code}"
     header += "."
     lines.append(header)
+
 
     lines.append(
         f"Properly asked: {r['share_properly_asked_answered']} "
@@ -2358,19 +2413,17 @@ def build_global_ai_context(
     df_int = data.get("interview", pd.DataFrame())
     if isinstance(df_int, pd.DataFrame) and not df_int.empty:
         parts.append("=== INTERVIEW_QC_CSV ===")
-        parts.append(df_int.head(max_rows).to_csv(index=False))
+        parts.append(sanitize_df_for_ai(df_int.head(max_rows)).to_csv(index=False))
 
-    # --- Question-level QC ---
     df_q = data.get("question", pd.DataFrame())
     if isinstance(df_q, pd.DataFrame) and not df_q.empty:
         parts.append("=== QUESTION_QC_CSV ===")
-        parts.append(df_q.head(max_rows).to_csv(index=False))
+        parts.append(sanitize_df_for_ai(df_q.head(max_rows)).to_csv(index=False))
 
-    # --- Issue table (codebook + numeric/text) ---
     df_issues = data.get("raw_qc_issues", pd.DataFrame())
     if isinstance(df_issues, pd.DataFrame) and not df_issues.empty:
         parts.append("=== ISSUES_CSV ===")
-        parts.append(df_issues.head(max_rows).to_csv(index=False))
+        parts.append(sanitize_df_for_ai(df_issues.head(max_rows)).to_csv(index=False))
 
     # --- Codebook and logic sheets ---
     if codebook_data:
@@ -2392,7 +2445,7 @@ def build_global_ai_context(
     # --- Raw data sample (all columns, limited rows) ---
     if isinstance(raw_df, pd.DataFrame) and not raw_df.empty:
         parts.append("=== RAW_DATA_SAMPLE_CSV ===")
-        parts.append(raw_df.head(max_rows).to_csv(index=False))
+        parts.append(sanitize_df_for_ai(raw_df.head(max_rows)).to_csv(index=False))
 
     return "\n".join(parts)
 
@@ -2435,27 +2488,20 @@ def ai_check_numeric_string_consistency(
         )
 
     # Identify ID columns we can show in the table
-    id_cols = [
-        c for c in ["interview__key", "interview__id", "technicalid"] if c in df_raw.columns
-    ]
-    all_cols: list[str] = list(
-        dict.fromkeys(id_cols + [c for pair in available_pairs for c in pair])
-    )
+    # We do NOT send any IDs to AI here
+    all_cols: list[str] = [c for pair in available_pairs for c in pair]
 
     df_subset = df_raw[all_cols].copy()
-
-    # Limit rows for safety, but keep enough to be useful
-    if len(df_subset) > max_rows:
-        df_subset = df_subset.head(max_rows)
-
+    df_subset = sanitize_df_for_ai(df_subset)
     sample_csv = df_subset.to_csv(index=False)
 
     context = (
         "You are checking consistency between numeric fields and their 'spelled-out' text versions "
         "in a World Bank Enterprise Survey raw dataset.\n\n"
-        "You receive a single CSV table where each row is one interview. Columns include:\n"
-        f"- ID columns (if present): {', '.join(id_cols) if id_cols else 'none'}\n"
+        "You receive a single CSV table where each row is one anonymous interview. "
+        "Columns include ONLY the numeric and text fields for the following pairs:\n"
         f"- Numeric/text pairs to check: {available_pairs}\n\n"
+        "No IDs, names, phone numbers, or other identifiers are included in the CSV for privacy reasons.\n\n"
         "Here is the CSV:\n"
         f"{sample_csv}"
     )
@@ -2470,7 +2516,8 @@ def ai_check_numeric_string_consistency(
         "| Var | InterviewID | NumericValue | TextValue | ParsedFromText | Notes |\n\n"
         "Where:\n"
         "- Var: the numeric variable name (e.g. d2, n2a, n3).\n"
-        "- InterviewID: use interview__id if present, otherwise interview__key, otherwise technicalid, otherwise leave blank.\n"
+        "- InterviewID: you may leave this blank or use a simple row index (e.g. 1, 2, 3...). "
+        "Real identifiers are removed for privacy; the system will map rows locally.\n"
         "- NumericValue: value from the numeric column.\n"
         "- TextValue: raw string from the text column (e.g. d2x, n2as).\n"
         "- ParsedFromText: the numeric value you infer from TextValue (or blank if you truly cannot parse it).\n"
@@ -2547,10 +2594,12 @@ def ai_check_string_qc(
             cb_subset_csv = cb_subset[keep_cols].to_csv(index=False)
 
     # 4) Build raw-data sample for these string vars
-    id_cols = [c for c in ["interview__key", "interview__id", "technicalid"] if c in raw_df.columns]
-    cols_for_sample = list(dict.fromkeys(id_cols + string_cols))
+    # We do not send any IDs to AI here; only string vars and maybe some meta if safe
+    cols_for_sample = list(dict.fromkeys(string_cols))
     sample = raw_df[cols_for_sample].head(max_rows)
+    sample = sanitize_df_for_ai(sample)
     sample_csv = sample.to_csv(index=False)
+
 
     context_parts = []
 
@@ -2582,7 +2631,8 @@ def ai_check_string_qc(
         "    | Var | InterviewID | ExampleValue | IssueType | Notes |\n"
         "  and one row per issue type / example (you can group similar issues for the same variable).\n"
         "- Var: the string variable name (e.g. a3x, k342x, k392x, c34bx).\n"
-        "- InterviewID: use interview__id if present, otherwise interview__key, otherwise technicalid, otherwise leave blank.\n"
+        "- InterviewID: you may leave this blank or use a simple row index (e.g. 1, 2, 3...). "
+        "Do NOT invent real identifiers; the system will map rows back to internal IDs locally.\n\n"
         "- ExampleValue: a representative problematic value from the sample.\n"
         "- IssueType: a short label like 'Missing/blank', 'Vague text', 'Invalid unit', 'Suspicious value'.\n"
         "- Notes: brief and to-the-point explanation (max ~15 words).\n\n"
@@ -2625,15 +2675,10 @@ def ai_check_isic_consistency(
         return f"Missing required columns for ISIC QC: {', '.join(missing)}"
 
     # ID columns to help identify interviews
-    id_cols = [c for c in ["interview__id", "interview__key", "technicalid"] if c in raw_df.columns]
-
-    cols = id_cols + ["d1a1a", "d1a1x", "d1a2_v4"]
-    cols = list(dict.fromkeys(cols))  # dedupe while preserving order
-
-    # Base sample from numeric raw_df (for IDs and numeric ISIC)
+    cols = ["d1a1a", "d1a1x", "d1a2_v4"]  # no IDs
     sample = raw_df[cols].head(max_rows).copy()
 
-    # Overwrite d1a1a with value labels when available
+    # overwrite d1a1a with value labels when available, same as before
     if (
         raw_df_labeled is not None
         and not raw_df_labeled.empty
@@ -2641,7 +2686,9 @@ def ai_check_isic_consistency(
     ):
         sample["d1a1a"] = raw_df_labeled.loc[sample.index, "d1a1a"].astype(str)
 
+    sample = sanitize_df_for_ai(sample)
     sample_csv = sample.to_csv(index=False)
+
 
     context = (
         "You are checking the consistency of main activity coding for an enterprise survey.\n\n"
@@ -2675,7 +2722,8 @@ def ai_check_isic_consistency(
         "set IssueType = 'Internal_code_mismatch' (even if vendor and AI_ISIC agree).\n\n"
         "4. Notes: a SHORT explanation (< 20 words) explaining your reasoning for IssueType.\n\n"
         "InterviewID RULE:\n"
-        "- Use interview__id if present; otherwise interview__key; otherwise technicalid; otherwise leave blank.\n\n"
+        "InterviewID: you may leave this blank or use a simple row index (1, 2, 3...). "
+        "Do NOT use real IDs; the system maps rows back to internal IDs locally.\n\n"
         "OUTPUT FORMAT (VERY IMPORTANT):\n"
         "- Output ONLY a SINGLE markdown table with header:\n"
         "    | InterviewID | d1a1a | d1a1x | d1a2_v4_vendor | AI_ISIC | IssueType | Notes |\n"
