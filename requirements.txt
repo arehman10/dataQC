@@ -7,3 +7,4 @@ openai
 openpyxl
 iso3166
 matplotlib
+ssaw
