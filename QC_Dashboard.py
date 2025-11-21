@@ -189,33 +189,20 @@ def suso_export_to_stata(
     api_password: str | None = None,
     token: str | None = None,
     export_password: str | None = None,
-    save_dir: str | None = None,   # <-- NEW optional argument
+    save_dir: str | None = None,   # <-- NEW
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-
     """
     Generate and download STATA export via Survey Solutions API,
     mirroring the behavior of R's suso_export / Stata's susoapi.
 
-    Steps:
-      1. POST /{workspace}/api/v2/export to start a STATA export job
-      2. Poll /{workspace}/api/v2/export/{job_id} until ExportStatus == 'Completed'
-      3. GET /{workspace}/api/v2/export/{job_id}/file to download the zip
-      4. Unzip (with password if provided)
-      5. Load the main .dta file twice:
-         - numeric codes (for QC engine)
-         - labeled version (for AI / human-readable context)
-
-    Returns:
-      (raw_df_numeric, raw_df_labeled)
+    If save_dir is provided, also save a copy of the export zip and the
+    main .dta file to that directory.
     """
+    import shutil  # for copy2
     server = server.rstrip("/")
     workspace = workspace.strip("/") or "primary"
 
     # --- Build QuestionnaireId correctly ---
-    # quest_id might be:
-    #   - bare GUID: "5a3a6a74-88d6-4a46-a3ef-b43005d1c9af"
-    #   - GUID w/o dashes: "5a3a6a7488d64a46a3efb43005d1c9af"
-    #   - full identity: "5a3a6a7488d64a46a3efb43005d1c9af$4"
     base_guid = quest_id.split("$")[0]          # take part before any $
     base_guid = base_guid.replace("-", "")      # remove dashes
     questionnaire_identity = f"{base_guid}${version}"
@@ -234,7 +221,6 @@ def suso_export_to_stata(
     export_base = f"{server}/{workspace}/api/v2/export"
 
     # --- 1. Start export job ---
-    # This is equivalent to R's suso_export(job_type="STATA", QuestionnaireId=..., InterviewStatus=...)
     body = {
         "ExportType": "STATA",
         "QuestionnaireId": questionnaire_identity,
@@ -242,7 +228,7 @@ def suso_export_to_stata(
     }
 
     start_resp = session.post(export_base, json=body)
-    if start_resp.status_code not in (200, 202, 201):
+    if start_resp.status_code // 100 != 2:
         raise RuntimeError(
             f"Failed to start export job. Status: {start_resp.status_code}, body: {start_resp.text}"
         )
@@ -265,7 +251,6 @@ def suso_export_to_stata(
         if status in {"Fail", "Failed", "Faulted", "Canceled"}:
             raise RuntimeError(f"Export job {job_id} failed: {info}")
 
-        # Optional: progress = info.get("Progress") or info.get("progress")
         time.sleep(5)
 
     # --- 3. Download export zip file ---
@@ -288,43 +273,64 @@ def suso_export_to_stata(
             else:
                 zf.extractall(path=extract_dir)
     except RuntimeError as e:
-        # typical error if zip is password-protected but no/incorrect password was provided
         raise RuntimeError(
             f"Failed to extract export zip (missing or wrong password?). "
             f"Original error: {e}"
         )
 
-    # --- 5. Find main .dta file and load ---
-    # --- 5. Find main .dta file and load ---
-    # --- 5. Find main .dta file and load ---
+    # --- 5. Find main .dta file ---
     dta_files = list(extract_dir.rglob("*.dta"))
     if not dta_files:
         raise RuntimeError(f"No .dta files found in export (unzipped at {extract_dir})")
 
-    main_dta = _select_main_dta(dta_files)
+    # Simple main selection: first file with interview__key, otherwise first
+    main_dta = None
+    for path in dta_files:
+        try:
+            head = pd.read_stata(path, convert_categoricals=False, nrows=5)
+        except Exception:
+            continue
+        if "interview__key" in head.columns:
+            main_dta = path
+            break
+    if main_dta is None:
+        main_dta = dta_files[0]
 
-
-    # --- OPTIONAL: save permanent copies of the zip and main .dta ---
+    # --- 6. OPTIONAL: save a copy to save_dir ---
     if save_dir:
         try:
             permanent = Path(save_dir).expanduser()
             permanent.mkdir(parents=True, exist_ok=True)
 
-            # Copy the raw SuSo export zip
+            # Build filenames that encode questionnaire + status
             zip_copy = permanent / f"suso_{questionnaire_identity}_{work_status}.zip"
-            zip_copy.write_bytes(zip_path.read_bytes())
-
-            # Copy the main .dta used for QC
             dta_copy = permanent / f"suso_{questionnaire_identity}_{work_status}_main.dta"
-            dta_copy.write_bytes(main_dta.read_bytes())
-        except Exception as e:
-            # Do NOT break the QC flow if saving fails; just log a warning
-            print(f"Warning: could not save export to {save_dir}: {e}")
 
+            shutil.copy2(zip_path, zip_copy)
+            shutil.copy2(main_dta, dta_copy)
+
+            # Optional: log to Streamlit so you can see it
+            try:
+                import streamlit as st  # already imported at top, but safe
+                st.write(f"DEBUG: Saved export zip to {zip_copy}")
+                st.write(f"DEBUG: Saved main .dta to {dta_copy}")
+            except Exception:
+                pass
+
+        except Exception as e:
+            # Show the error in the Streamlit app so you know it failed
+            try:
+                import streamlit as st
+                st.error(f"Could not save export to {save_dir}: {e}")
+            except Exception:
+                print(f"Could not save export to {save_dir}: {e}")
+
+    # --- 7. Load data into pandas and return ---
     raw_df_numeric = pd.read_stata(main_dta, convert_categoricals=False)
     raw_df_labeled = pd.read_stata(main_dta, convert_categoricals=True)
 
     return raw_df_numeric, raw_df_labeled
+
 
 
 
@@ -4925,6 +4931,7 @@ with tab_report:
                 key="ai_full_report_textarea_ai",
             )
             st.session_state["ai_full_report"] = st.session_state["ai_full_report_textarea_ai"]
+
 
 
 
