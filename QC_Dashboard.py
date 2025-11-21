@@ -14,6 +14,7 @@
 # Notes:
 # - Column and sheet names are aligned to the Sri Lanka QC file you shared.
 # - All counts, averages, and charts are based directly on those sheets.
+
 # ---------- Imports & AI client setup ----------
 
 import io
@@ -4924,5 +4925,6 @@ with tab_report:
                 key="ai_full_report_textarea_ai",
             )
             st.session_state["ai_full_report"] = st.session_state["ai_full_report_textarea_ai"]
+
 
 
